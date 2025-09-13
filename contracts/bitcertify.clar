@@ -313,3 +313,105 @@
       )
       ERR-INVALID-BATCH-SIZE
     )
+
+    ;; Validate each expiry date
+    (asserts! (fold check-all-expiry-dates expiry-dates true) ERR-INVALID-EXPIRY)
+
+    (ok (map process-credential-issuance credential-ids students degrees years
+      metadata-urls expiry-dates categories
+    ))
+  )
+)
+
+;; ENDORSEMENT SYSTEM FUNCTIONS
+
+;; Allows institutions to endorse credentials with additional details
+(define-public (endorse-credential-extended
+    (credential-id (string-ascii 64))
+    (student principal)
+    (weight uint)
+    (comment (string-ascii 256))
+    (endorser-type (string-ascii 32))
+  )
+  (let (
+      (endorser tx-sender)
+      (credential (unwrap!
+        (map-get? credentials {
+          id: credential-id,
+          student: student,
+        })
+        ERR-CREDENTIAL-NOT-FOUND
+      ))
+      (endorser-data (unwrap! (map-get? institutions endorser) ERR-NOT-AUTHORIZED))
+    )
+    (asserts! (get active endorser-data) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get revoked credential)) ERR-INVALID-STATUS)
+    (asserts! (< stacks-block-height (get expiry-date credential)) ERR-EXPIRED)
+    (asserts! (validate-credential-id credential-id) ERR-INVALID-INPUT)
+    (asserts! (validate-endorsement-weight weight) ERR-INVALID-INPUT)
+    (asserts! (validate-non-empty-string endorser-type) ERR-INVALID-INPUT)
+    (asserts! (validate-comment comment) ERR-INVALID-INPUT)
+
+    ;; Check if already endorsed by this endorser
+    (asserts!
+      (is-none (map-get? endorsements {
+        credential-id: credential-id,
+        endorser: endorser,
+      }))
+      ERR-ALREADY-ENDORSED
+    )
+
+    (map-set endorsements {
+      credential-id: credential-id,
+      endorser: endorser,
+    } {
+      timestamp: stacks-block-height,
+      weight: weight,
+      comment: comment,
+      endorser-type: endorser-type,
+    })
+
+    (map-set credentials {
+      id: credential-id,
+      student: student,
+    }
+      (merge credential {
+        endorsements: (+ (get endorsements credential) u1),
+        last-endorsed: stacks-block-height,
+      })
+    )
+
+    (map-set institutions (get institution credential)
+      (merge endorser-data {
+        reputation-score: (+ (get reputation-score endorser-data) weight),
+        last-update: stacks-block-height,
+      })
+    )
+    (ok true)
+  )
+)
+
+;; TRANSFER SYSTEM FUNCTIONS
+
+;; Initiates a credential transfer to a new owner
+(define-public (request-credential-transfer
+    (credential-id (string-ascii 64))
+    (new-owner principal)
+    (transfer-type (string-ascii 32))
+    (expiry-time uint)
+  )
+  (let (
+      (transfer-id (var-get transfer-counter))
+      (credential (unwrap!
+        (map-get? credentials {
+          id: credential-id,
+          student: tx-sender,
+        })
+        ERR-CREDENTIAL-NOT-FOUND
+      ))
+    )
+    (asserts! (not (get revoked credential)) ERR-INVALID-STATUS)
+    (asserts! (validate-expiry expiry-time) ERR-INVALID-EXPIRY)
+    (asserts! (validate-credential-id credential-id) ERR-INVALID-INPUT)
+    (asserts! (validate-non-empty-string transfer-type) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender new-owner)) ERR-INVALID-INPUT)
